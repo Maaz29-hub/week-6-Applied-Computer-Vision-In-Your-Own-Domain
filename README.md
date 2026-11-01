@@ -1,170 +1,127 @@
-# Steel Surface Defect Classification with ResNet18
+## Week 7: Text and Multimodal AI
 
-Week 6 lab of *Introduction to Applied AI* (BS 8th Semester, Department of Electronics): a complete computer vision pipeline that classifies six types of surface defect on strip steel, with a data audit, a leakage check, macro-F1 model selection and a Grad-CAM shortcut check.
+**Course:** Introduction to Applied AI (BS 8th Semester, Department of Electronics)
+**Project 2:** Deep Learning Applications 
+**Domain:** steel surface defect inspection (NEU-DET, six defect classes)
+**Notebook:** `Week 7 - Text and Multimodal` (Kaggle, Internet On, GPU optional)
 
-**Result in one line:** a fine-tuned ResNet18 reaches **macro-F1 0.997** on 360 held-out test images, with one error out of 360.
+This week my Project 2 system learned to read. I reproduced TF-IDF by hand, compared word and character n-gram classifiers, measured and improved an entity extractor on steel-inspection text, wrote regex fields with negative tests, measured OCR quality with character error rate, and combined my Week 6 image model with text evidence into one masked, explainable JSON record.
 
-## Contents
+### Summary
 
-- [Why this matters](#why-this-matters)
-- [Dataset](#dataset)
-- [Data audit](#data-audit)
-- [Method](#method)
-- [Results](#results)
-- [Grad-CAM shortcut check](#grad-cam-shortcut-check)
-- [Limitations](#limitations)
-- [Responsibility questions](#responsibility-questions)
-- [How to reproduce](#how-to-reproduce)
-- [Repository layout](#repository-layout)
+- Text classifier: SMS Spam Collection (UCI), 5,572 texts, macro-F1 **0.974** (word 1-2 grams) vs **0.982** (char 2-5 grams)
+- Top positive / negative features: call, txt, free, claim / my, me, ok, can
+- NER on my domain: out-of-the-box held-out F1 **0.667** -> with entity ruler **0.900** (provided sentences: 0.533 -> 0.875)
+- Regex fields extracted: CNIC, mobile, amount, date, email, invoice, coil, batch, defect; false positives tested: 5 negative tests, all passed (9 of 9 tests)
+- OCR: CER raw 0.062 / 0.059 / 0.143 -> **0.000** after correction rules (synthetic invoice: 0.000 before and after)
+- Pipeline: image model + text evidence -> JSON record (example below)
+- Privacy: CNIC, phone, and email masked before logging
 
-## Why this matters
+### Results by part
 
-**Who benefits:** quality-control engineers and inspectors on steel production lines, who must find surface defects in strip steel.
-
-**Why it matters:** defects that go unnoticed lead to scrap, rework, and defective product reaching customers. Checking images by eye is slow and differs from one inspector to the next, so an automatic first-pass classifier can help sort and flag images for a person to review.
-
-## Dataset
-
-| | |
-|---|---|
-| **Name** | NEU Surface Defect Database (the `NEU-DET` folder), Kaggle upload by `kaustubhdikshit` |
-| **Link** | https://www.kaggle.com/datasets/kaustubhdikshit/neu-surface-defect-database |
-| **Size** | 1,800 images, 200 x 200 pixels, stored as RGB but visually grayscale |
-| **Classes (6)** | crazing, inclusion, patches, pitted_surface, rolled-in_scale, scratches |
-| **Labels** | Class folders supplied by the dataset's creators; I did not re-label or verify them independently |
-| **Licence** | See the dataset's Kaggle page for its terms. The images are **not** redistributed in this repository |
-
-How the data was used:
-
-| Split | Images | Source |
+| Part | What I did | Measured result |
 |---|---|---|
-| Train | 1,200 | 5/6 of the `train/images` folder (1,440 images), split by group |
-| Validation | 240 | 1/6 of the `train/images` folder, used to choose the best epoch |
-| Test | 360 | the dataset's `validation/images` folder (60 per class), used once at the end |
+| 1. TF-IDF by hand | Reproduced scikit-learn's smooth IDF with L2 normalisation on three messages | d1 = win 0.584, free 0.445, cash 0.584, now 0.345 (identical in both printouts); cosine(d2, d3) = 0.544 |
+| 2. Text classification | TF-IDF + Logistic Regression on SMS spam, 80/20 stratified split (1,115 test messages) | See table below |
+| 3. NER, measured | Gold set scored by exact text AND label; entity ruler added before the statistical model | Provided set F1 0.533 -> 0.875; my held-out F1 0.667 -> 0.900 |
+| 4. Regex fields | Six provided patterns plus three for steel inspection | 9 of 9 tests passed, including 5 negative tests |
+| 5. CER and OCR repair | Levenshtein-based CER, context rules, EasyOCR on a synthetic invoice | Hand-made errors 0.062 / 0.059 / 0.143 -> 0.000; invoice 0.000 -> 0.000 |
+| 6. Image + text record | Late fusion with transparent rules and PII masking | REFER with two reasons; phone digits leaked: False |
 
-## Data audit
+### Text classification (Part 2)
 
-| Check | Finding |
-|---|---|
-| Class counts (train folder) | 240 images in every class |
-| Imbalance ratio (max / min) | 1.0, perfectly balanced |
-| Image size and mode | 200 x 200 pixels, RGB (300 of 300 sampled) |
-| Images per group | 1.00: file names carry no part or subject ID, so every image is its own group |
-| Shared groups, train vs validation | 0 |
-| Exact duplicate files (MD5, train and test combined) | 2 files, i.e. one identical pair. The notebook did not remove them, so at most one test image could be affected |
-| Test images with a near-duplicate in train | 0 of 360 (threshold 0.10; closest distances 0.108, 0.115, 0.115, 0.126, 0.126) |
-| Flagged pairs inspected | I viewed the 4 closest train/test pairs side by side: they are different images with similar steel texture and lighting, so nothing was deleted |
+Dataset: 5,572 messages, 4,825 ham and 747 spam (13.4% spam). An "always ham" classifier would score 0.866 accuracy, so accuracy alone is misleading.
 
-**First shortcut suspect: overall brightness.** In the sample grid, `patches` and `pitted_surface` images are bright, almost white, while `inclusion` and `scratches` images are dark grey. Brightness is not the defect itself, so a model could partly rely on it. This is only a suspect: `crazing` images range from dark to bright, and several images have a lighting gradient from left to right.
-
-![Sample images from every class](images/sample_grid.png)
-
-## Method
-
-- **Backbone:** ResNet18 pretrained on ImageNet, with the last layer replaced by a 6-class head. Images are converted to grayscale and then to 3 channels, and resized to 224 x 224.
-- **Imbalance handling:** weighted cross-entropy with weight = N / (K x n_c). Training set N = 1,200 and K = 6 classes, so for `inclusion` (n_c = 199) the weight is 1200 / (6 x 199) = 1.005, and for `patches` (n_c = 201) it is 0.995. All weights are between 0.995 and 1.005, because the classes are balanced, so imbalance is not a problem in this dataset. I did not try the balanced sampler.
-- **Augmentation:** random resized crop (scale 0.8 to 1.0), rotation up to 10 degrees, and brightness/contrast jitter of 0.15. Flips and strong distortions were left out to keep defects realistic. The jitter may also reduce reliance on brightness.
-- **Training:** two phases, about 5 seconds per epoch on a Kaggle GPU. Phase 1 trained only the head (3,078 parameters) for 2 epochs. Phase 2 also fine-tuned the last block (`layer4`) for 3 epochs. The best epoch was chosen by validation **macro-F1**, not accuracy.
-- **Split:** `StratifiedGroupKFold` (6 splits, seed 42), so no group appears in both train and validation.
-
-## Results
-
-### Validation macro-F1 during training
-
-| Phase | Epoch | Validation macro-F1 |
-|---|---|---|
-| 1 (head only) | 1 | 0.744 |
-| 1 (head only) | 2 | 0.975 |
-| 2 (fine-tune last block) | 1 | 0.987 |
-| 2 (fine-tune last block) | 2 | 0.996 |
-| 2 (fine-tune last block) | 3 | 1.000 |
-
-Fine-tuning helped, raising the best validation macro-F1 from 0.975 to 1.000. A perfect score on 240 validation images suggests the task is fairly easy, and the best epoch was chosen on that same set, so it is slightly optimistic.
-
-### Test set (used once): 360 images
-
-**Macro-F1 0.997, accuracy 0.997.**
-
-| Class | Precision | Recall | F1 | Support |
+| Model | Macro-F1 | Spam precision | Spam recall | Features |
 |---|---|---|---|---|
-| crazing | 1.000 | 1.000 | 1.000 | 60 |
-| inclusion | 1.000 | 0.983 | 0.992 | 60 |
-| patches | 1.000 | 1.000 | 1.000 | 60 |
-| pitted_surface | 1.000 | 1.000 | 1.000 | 60 |
-| rolled-in_scale | 1.000 | 1.000 | 1.000 | 60 |
-| scratches | 0.984 | 1.000 | 0.992 | 60 |
+| Word 1-2 grams | 0.974 | 0.979 | 0.933 | 12,128 |
+| Char 2-5 grams | **0.982** | **0.986** | **0.953** | 36,449 |
 
-The only error is one `inclusion` image predicted as `scratches`. Both defects can appear as elongated streaks, so the confusion is plausible. One error is 0.3% of the test set, so the score should not be read as a guarantee on a real production line.
+- **Top features (word model).** Most spam-like: call, txt, free, text, reply, uk, to, www, mobile, claim, stop, your. Most ham-like: my, me, ok, that, it, but, ll, gt, lt, can, what, da. Most make sense, but "to" and "your" are ordinary function words, and "gt" and "lt" are leftovers of ">" and "<" encoded as HTML in this dataset, so they are shortcuts rather than meaning.
+- **Error analysis (word model, 13 of 1,115).** 10 missed spam and 3 false alarms. I classified them as 7 model errors, 2 label errors (a tattoo joke and a dartboard sale ad labelled spam) and 4 genuinely ambiguous messages. "Waiting for your call." scored 0.85 because "call" is a strong spam feature.
+- **Spelling tricks.** With the character model, "W1N a FR33 pr1ze!! txt CLAIM now" scored 0.85 (spam) and the Roman Urdu "kal milte hain, 5 baje" scored 0.12 (ham), both correct. My own tricky messages scored: Roman Urdu spam, word 0.60 and char 0.66; disguised English spam, word 0.86 and char 0.90. Both models caught them, but the Roman Urdu one with much lower confidence.
 
-Binary metrics (a recall threshold, sensitivity, specificity and PPV) do not apply, because this task has six classes.
+### Named entity recognition (Part 3)
 
-![Confusion matrix on the test set](images/confusion_matrix.png)
+Entities count as correct only if both the exact text and the label match.
 
-## Grad-CAM shortcut check
+| Set | Before rules (F1) | After rules (F1) |
+|---|---|---|
+| Provided 6 sentences (16 gold entities) | 0.533 (P 0.571, R 0.500) | 0.875 (P 0.875, R 0.875) |
+| My first 5 sentences (rules written from these) | 0.485 | 0.941 |
+| **My last 5 sentences (held out)** | **0.667** (P 0.684, R 0.650) | **0.900** (P 0.900, R 0.900) |
 
-Grad-CAM highlights the image regions that drove each prediction. Because the model made only one mistake, the grid shows four heatmaps (three correct, one wrong) and two empty panels.
+The held-out score is the honest one, because the rules were written only from the first five sentences.
 
-![Grad-CAM heatmaps](images/gradcam.png)
+- **What spaCy got wrong out of the box:** company names read as PERSON, dd/mm/yyyy dates labelled GPE, PKR and Rs. amounts split or mislabelled, and Pakistani cities labelled ORG or PERSON.
+- **Errors that remain after rules:** coil and batch numbers (`4417`, `2205`) labelled DATE, and names the rules had never seen ("Ittefaq Foundry" and "Sialkot").
+- **What I would do next:** a regex or a filter that checks the preceding word ("coil", "batch") for the number problem, and a model trained on a few hundred annotated reports for unseen names. Ten sentences are too few to train one.
 
-1. True crazing, predicted crazing: two hot spots along the top, on crack junctions in the surface texture. Legitimate evidence.
-2. True crazing, predicted crazing: a vertical band on the left and a horizontal band across the top, following the crack network. Legitimate.
-3. True crazing, predicted crazing: one hot spot at the upper left, on a crack junction. Legitimate, though less spread out.
-4. True inclusion, predicted scratches (the one error): attention on a dark vertical streak at the left. The model looked at the real defect, but its long, thin shape resembles a scratch.
-5. and 6. Not shown, because there were no more wrong examples.
+### Regex fields (Part 4)
 
-**Verdict: no shortcut found, with limited confidence.** The attention sits on the defect and the surface texture, not on borders, corners or the brightness of the whole image, and the images contain no text or labels. The sample is small, and all three correct examples are the same class.
+Patterns: CNIC, mobile, amount, date, email and invoice number (provided), plus three for steel inspection:
 
-**Follow-up experiment:** for one correctly classified image per class, mask or crop out the highlighted region and re-score. A large drop in confidence would show the model depends on that region. Brightness could also be tested directly by darkening or brightening images and checking whether predictions change.
+- `coil`: `\bcoil\s+(\d{3,6})\b`
+- `batch`: `\bbatch\s+(\d{3,6})\b`
+- `defect`: `\b(crazing|inclusion|patches|pitted surface|rolled-in scale|scratches)\b`
 
-## Limitations
+All 9 tests passed. The negative tests were: a 14-digit order number (not a CNIC), "Room 0300" (not a mobile), "Coil 12" (too few digits), "coil 4417896" (too many digits) and "A batch of 25 sheets" (no batch number).
 
-- **Data source:** one dataset from a controlled setting: 200 x 200 images of steel surfaces under consistent lighting, six defect types, one defect type per image, and no defect-free class.
-- **Evaluation:** a small test set (360 images), a best epoch selected on a validation set drawn from the same data, one training run, and only four Grad-CAM heatmaps inspected.
-- **Not for:** automatic accept/reject decisions on steel, safety-critical parts, or any production line other than the one that produced these images, without further validation and human review.
+My first coil pattern, `coil\s+\d+`, matched all three of my test strings, including the two that must be rejected. A word boundary and an exact digit count (`{3,6}`) fixed it.
 
-## Responsibility questions
+### OCR quality (Part 5)
 
-**1. Who could be harmed and how?** Customers and downstream manufacturers could receive defective steel if the model misses or mislabels a defect. A wrong label also sends the wrong signal to the process team: an inclusion called scratches points to a different cause than an inclusion called inclusion, so effort could go to the wrong fix. Because the model has no "no defect" class, a clean strip would be forced into one of the six defect labels, causing false alarms and wasted rework.
+| Reference | OCR output | CER before | CER after |
+|---|---|---|---|
+| Invoice No. 4417 | Invoice N0. 4417 | 0.062 | 0.000 |
+| Total: PKR 12,500 | Total: PKR 12,5O0 | 0.059 | 0.000 |
+| Due 30/09/2026 | Due 3O/09/2O26 | 0.143 | 0.000 |
 
-**2. Where was the model not validated?** Only on this one dataset: one camera and lighting setup, 200 x 200 images and six defect types. It has not been tested on other steel grades, mills, cameras, lighting, image sizes, strips with no defect, or strips with several defects.
+On the synthetic invoice, EasyOCR read all five lines correctly (CER 0.000 before and after), so the correction rules had nothing to repair. That image is black text on white in one clean font, which is much easier than a real phone photo. On real documents I expect a clearly non-zero CER concentrated in digits and look-alike characters, so field-level accuracy should be measured too.
 
-**3. What is the human role?** An inspector stays responsible for the accept/reject decision. The model works as an assistant that sorts and flags images, and a person reviews its predictions, especially uncertain ones and the defect types that get confused (inclusion and scratches). People should also audit a sample of predictions regularly and report new defect types or changes on the line.
+### Image + text case record (Part 6)
 
-**4. What evidence would change my conclusions?** Lower scores on images from a different line, camera or lighting would show the result does not transfer. A drop in accuracy after darkening or brightening the images, or after masking the Grad-CAM region, would show the model relies on brightness or a narrow area. Heatmaps that concentrate on borders or corners would confirm a shortcut. More errors on a larger test set, or duplicates between train and test found by a deeper audit, would mean the 0.997 macro-F1 is too optimistic.
+Late fusion: my Week 6 ResNet-18 (six classes: crazing, inclusion, patches, pitted_surface, rolled-in_scale, scratches) gives image probabilities, and the note gives entities, regex fields and urgent terms. Transparent rules combine them. The class I must not miss is **crazing**, since fine cracks can spread.
 
-## How to reproduce
+The note is masked **before** any extraction, so the phone number cannot reappear in the entities or fields.
 
-1. On [Kaggle](https://www.kaggle.com), create a notebook, click **Add Input**, and add the *NEU Surface Defect Database* dataset linked above.
-2. In the notebook settings, turn on a **GPU** accelerator and **Internet** (needed to download the pretrained ResNet18 weights).
-3. Upload the notebook from this repository (**File → Import Notebook**) or copy its cells in order.
-4. Check the configuration cell. The settings used here were:
-
-```python
-DATA_ROOT = '/kaggle/input/datasets/kaustubhdikshit/neu-surface-defect-database/NEU-DET'
-TRAIN_DIR = f'{DATA_ROOT}/train/images'
-TEST_DIR  = f'{DATA_ROOT}/validation/images'   # held-out test set, used once
-GRAYSCALE = True
-IMG_SIZE  = 224
-BACKBONE  = 'resnet18'
-GROUP_PATTERN = None    # file names contain no subject ID
-POSITIVE = None         # six classes, so no binary threshold
-TARGET_RECALL = None
+```json
+{
+  "image": "crazing_241.jpg",
+  "image_probabilities": {
+    "crazing": 1.0, "inclusion": 0.0, "patches": 0.0,
+    "pitted_surface": 0.0, "rolled-in_scale": 0.0, "scratches": 0.0
+  },
+  "note_masked": "Inspector Imran Sheikh at Pakistan Steel Mills, Karachi found fine cracks spreading on coil 4417 on 12/09/2026. Contact mobile [PHONE].",
+  "text_evidence": {
+    "entities": [["Imran Sheikh", "PERSON"], ["Pakistan Steel Mills", "ORG"],
+                 ["Karachi", "GPE"], ["4417", "DATE"], ["12/09/2026", "DATE"]],
+    "fields": {"date": ["12/09/2026"], "coil": ["4417"]},
+    "urgent_terms": ["crack", "spreading"]
+  },
+  "decision": "REFER",
+  "reasons": ["image model: P(crazing) = 1.00", "note mentions: crack, spreading"],
+  "disclaimer": "Decision support only; a qualified human decides."
+}
 ```
 
-   The dataset path can differ between Kaggle sessions, so confirm it in the **Input** panel.
-5. Click **Run All**. Training takes roughly a minute. The final cell saves `week6_model.pt` (ResNet18 weights, class list, image size) to `/kaggle/working`.
+- **A wrong entity:** "4417" is a coil number but was labelled DATE. It is harmless for this decision, which came from the image probability and urgent terms, but harmful if a database stored the entity list. The regex field `coil: ["4417"]` has the right value.
+- **When image and note disagree:** with a patches image and the same note, P(crazing) = 0.0 and the decision was REFER on the note alone. With the crazing image and a note saying "Surface looks normal", P(crazing) = 1.0 and the decision was REFER on the image alone. The system should refer such cases and state the disagreement explicitly, which is a possible next improvement.
 
-Libraries: PyTorch, torchvision, scikit-learn, pandas, NumPy, Pillow, matplotlib (all preinstalled on Kaggle). Random seeds are fixed at 42, but GPU results can still vary slightly between runs.
+### Privacy
 
-## Repository layout
+CNIC numbers, mobile numbers and email addresses are masked (`[CNIC]`, `[PHONE]`, `[EMAIL]`) before extraction and logging. A leak check on the final JSON for the phone digits printed `False`.
 
-```
-.
-├── README.md
-├── week6-steel-defect-classification.ipynb   # the Kaggle notebook with outputs
-└── images/
-    ├── sample_grid.png
-    ├── closest_pairs.png
-    ├── confusion_matrix.png
-    └── gradcam.png
-```
+### Limitations
+
+- The domain gold set has only 10 sentences, so the NER scores have a wide margin of error.
+- The entity rules fix a closed list of names and will not generalise to new ones.
+- The image evidence comes from one validation image, so its probability of 1.00 is an example and not a performance claim.
+- The OCR test used a clean synthetic image, not real scans.
+- The record is decision support only; a qualified human decides.
+
+### How to reproduce
+
+1. Create a Kaggle notebook with **Internet On** (EasyOCR downloads its models on first use).
+2. Add the inputs: the *SMS Spam Collection Dataset* (uciml), the *NEU Surface Defect Database*, and my Week 6 notebook output containing `week6_model.pt`.
+3. Run all cells from the top.
